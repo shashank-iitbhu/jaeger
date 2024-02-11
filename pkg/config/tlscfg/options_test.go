@@ -18,7 +18,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -185,4 +187,57 @@ func TestOptionsToConfig(t *testing.T) {
 			require.NoError(t, test.options.Close())
 		})
 	}
+}
+
+func TestConcurrentCertPoolAccessForDataRace(t *testing.T) {
+	certPath := filepath.Join(testCertKeyLocation, "example-CA-cert.pem")
+	certBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("Failed to read certificate file: %v", err)
+	}
+
+	certPool := x509.NewCertPool()
+
+	// This function attempts to append certs from PEM concurrently.
+	appendCertsConcurrently := func(wg *sync.WaitGroup) {
+		defer wg.Done()
+		if !certPool.AppendCertsFromPEM(certBytes) {
+			t.Error("Failed to append certs from PEM")
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go appendCertsConcurrently(&wg)
+	}
+
+	wg.Wait()
+}
+
+func TestConcurrentConfigAccess(t *testing.T) {
+	logger := zap.NewNop()
+	options := Options{
+		Enabled:    true,
+		CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		CertPath:   testCertKeyLocation + "/example-client-cert.pem",
+		KeyPath:    testCertKeyLocation + "/example-client-key.pem",
+		ServerName: "localhost",
+	}
+
+	// This will attempt to concurrently load the TLS config by invoking the Config method of the Options struct.
+	loadTLSConfigConcurrently := func(wg *sync.WaitGroup) {
+		defer wg.Done()
+		if _, err := options.Config(logger); err != nil {
+			t.Errorf("Failed to load TLS config: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go loadTLSConfigConcurrently(&wg)
+	}
+
+	wg.Wait()
 }
